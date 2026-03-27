@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RefreshCw, Mic, MicOff, CheckCircle, AlertCircle, Search } from "lucide-react";
 import { useInventory } from "@/context/InventoryContext";
 import { LOW_STOCK_THRESHOLD } from "@/types/inventory";
@@ -6,12 +6,18 @@ import { useSpeechRecognition } from "@/hooks/use-speech-recognition";
 import { motion, AnimatePresence } from "framer-motion";
 
 export default function InventoryManage() {
-  const { products, updateStock } = useInventory();
+  const { products, updateStock, refreshProducts } = useInventory();
   const [editQty, setEditQty] = useState<Record<string, string>>({});
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [quickText, setQuickText] = useState("");
+  const [isQuickSubmitting, setIsQuickSubmitting] = useState(false);
   const [search, setSearch] = useState("");
   const { isListening, transcript, startListening, stopListening, resetTranscript, isSupported } = useSpeechRecognition();
+  const latestTranscriptRef = useRef("");
+
+  useEffect(() => {
+    latestTranscriptRef.current = transcript;
+  }, [transcript]);
 
   const showFeedback = (type: "success" | "error", message: string) => {
     setFeedback({ type, message });
@@ -21,37 +27,167 @@ export default function InventoryManage() {
   const handleRowUpdate = (id: string, name: string) => {
     const val = editQty[id];
     if (val === undefined || val === "") return;
-    const result = updateStock(id, parseInt(val));
-    showFeedback(result.startsWith("✅") ? "success" : "error", result);
-    setEditQty((prev) => ({ ...prev, [id]: "" }));
-  };
-
-  const parseQuickUpdate = (text: string) => {
-    // Try patterns like "update laptop stock to 20" or "set mouse to 50"
-    const match = text.match(/(?:update|set)\s+(.+?)\s+(?:stock\s+)?to\s+(\d+)/i);
-    if (match) {
-      const result = updateStock(match[1].trim(), parseInt(match[2]));
-      showFeedback(result.startsWith("✅") ? "success" : "error", result);
+    const quantity = parseInt(val, 10);
+    if (Number.isNaN(quantity) || quantity < 0) {
+      showFeedback("error", "Please enter a valid quantity (0 or more).");
       return;
     }
-    showFeedback("error", "Couldn't understand that. Try: \"Update Mouse to 20\"");
+
+    void (async () => {
+      try {
+        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5000"}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ P_ID: id, quantity }),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          showFeedback("error", data.error || `Could not update ${name}.`);
+          return;
+        }
+
+        updateStock(id, quantity);
+        await refreshProducts();
+        showFeedback("success", data.message || `${name} updated to ${quantity}`);
+        setEditQty((prev) => ({ ...prev, [id]: "" }));
+      } catch {
+        showFeedback("error", "Could not reach backend update service.");
+      }
+    })();
+  };
+
+  const parseQuickUpdate = async (text: string) => {
+    const cleanedText = text.trim();
+    if (!cleanedText) return;
+
+    const extractCommand = (command: string) => {
+      const wordToNumber = (raw: string) => {
+        const map: Record<string, number> = {
+          zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+          ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
+          seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50,
+          sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100,
+        };
+        const tokens = raw.toLowerCase().trim().split(/\s+/).filter(Boolean);
+        if (tokens.length === 0) return null;
+
+        let total = 0;
+        let current = 0;
+        for (const token of tokens) {
+          const value = map[token];
+          if (value === undefined) return null;
+          if (value === 100) {
+            current = Math.max(1, current) * 100;
+          } else {
+            current += value;
+          }
+        }
+        total += current;
+        return Number.isFinite(total) ? total : null;
+      };
+
+      const patterns = [
+        /(?:update|set|change)\s+(.+?)\s+(?:stock\s+)?to\s+(\d+|[a-z\s]+)$/i,
+        /(?:update|set|change)\s+(.+?)\s+(\d+|[a-z\s]+)\s*$/i,
+        /^(.+?)\s+(?:to\s+)?(\d+|[a-z\s]+)\s*$/i,
+      ];
+
+      for (const pattern of patterns) {
+        const match = command.match(pattern);
+        if (!match) continue;
+        const productQuery = match[1].trim().toLowerCase();
+        const rawQty = match[2].trim().toLowerCase();
+        const numericQty = Number(rawQty);
+        const quantity = Number.isNaN(numericQty) ? wordToNumber(rawQty) : numericQty;
+        if (!productQuery || quantity === null || Number.isNaN(quantity)) continue;
+        return { productQuery, quantity };
+      }
+
+      return null;
+    };
+
+    const resolveProduct = (productQuery: string) => {
+      const normalized = productQuery.toLowerCase();
+      return (
+        products.find((p) => p.name.toLowerCase() === normalized) ||
+        products.find((p) => p.name.toLowerCase().includes(normalized) || normalized.includes(p.name.toLowerCase()))
+      );
+    };
+
+    setIsQuickSubmitting(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5000"}/voice-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: cleanedText }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        const parsed = extractCommand(cleanedText);
+        if (!parsed) {
+          showFeedback("error", data.error || "Couldn't understand that. Try: \"Update Mouse to 20\"");
+          return;
+        }
+
+        const matchedProduct = resolveProduct(parsed.productQuery);
+        if (!matchedProduct) {
+          showFeedback("error", data.error || `No product matched "${parsed.productQuery}".`);
+          return;
+        }
+
+        const fallbackResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5000"}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ P_ID: matchedProduct.id, quantity: parsed.quantity }),
+        });
+        const fallbackData = await fallbackResponse.json();
+
+        if (!fallbackResponse.ok) {
+          showFeedback("error", fallbackData.error || "Update failed.");
+          return;
+        }
+
+        updateStock(matchedProduct.id, parsed.quantity);
+        await refreshProducts();
+        showFeedback("success", fallbackData.message || `${matchedProduct.name} updated to ${parsed.quantity}`);
+        return;
+      }
+
+      const productName = data?.product ? String(data.product) : "";
+      const parsedQuantity = Number(data?.quantity);
+      if (productName && !Number.isNaN(parsedQuantity)) {
+        updateStock(productName, parsedQuantity);
+      }
+      await refreshProducts();
+      showFeedback("success", data.message || "Stock updated successfully");
+    } catch {
+      showFeedback("error", "Could not reach backend voice service.");
+    } finally {
+      setIsQuickSubmitting(false);
+    }
   };
 
   const handleQuickSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickText.trim()) return;
-    parseQuickUpdate(quickText);
+    void parseQuickUpdate(quickText);
     setQuickText("");
   };
 
   const toggleMic = () => {
+    if (isQuickSubmitting) return;
     if (isListening) {
       stopListening();
       setTimeout(() => {
-        if (transcript) {
-          setQuickText(transcript);
-          parseQuickUpdate(transcript);
+        const latestText = latestTranscriptRef.current.trim();
+        if (latestText) {
+          setQuickText(latestText);
+          void parseQuickUpdate(latestText);
           resetTranscript();
+        } else {
+          showFeedback("error", "No speech captured. Please try again.");
         }
       }, 400);
     } else {
@@ -110,6 +246,7 @@ export default function InventoryManage() {
             <button
               type="button"
               onClick={toggleMic}
+              disabled={isQuickSubmitting}
               className={`shrink-0 rounded-lg p-2.5 transition-all ${
                 isListening
                   ? "mic-pulse bg-accent text-accent-foreground"
@@ -122,9 +259,10 @@ export default function InventoryManage() {
           )}
           <button
             type="submit"
+            disabled={isQuickSubmitting}
             className="rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 active:scale-[0.98]"
           >
-            Go
+            {isQuickSubmitting ? "..." : "Go"}
           </button>
         </form>
         {isListening && (

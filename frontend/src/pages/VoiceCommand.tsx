@@ -1,23 +1,47 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, CheckCircle, AlertCircle } from "lucide-react";
 import { useSpeechRecognition } from "@/hooks/use-speech-recognition";
 import { useInventory } from "@/context/InventoryContext";
 import { motion, AnimatePresence } from "framer-motion";
 
 export default function VoiceCommand() {
-  const { updateStock } = useInventory();
+  const { updateStock, refreshProducts } = useInventory();
   const { isListening, transcript, startListening, stopListening, resetTranscript, isSupported } = useSpeechRecognition();
   const [result, setResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [lastCommand, setLastCommand] = useState("");
+  const latestTranscriptRef = useRef("");
 
-  const processCommand = (text: string) => {
-    setLastCommand(text);
-    const match = text.match(/(?:update|set|change)\s+(.+?)\s+(?:stock\s+)?to\s+(\d+)/i);
-    if (match) {
-      const msg = updateStock(match[1].trim(), parseInt(match[2]));
-      setResult({ type: msg.startsWith("✅") ? "success" : "error", message: msg });
-    } else {
-      setResult({ type: "error", message: 'Try saying: "Update Mouse to 20"' });
+  useEffect(() => {
+    latestTranscriptRef.current = transcript;
+  }, [transcript]);
+
+  const processCommand = async (text: string) => {
+    const cleanedText = text.trim();
+    if (!cleanedText) return;
+
+    setLastCommand(cleanedText);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5000"}/voice-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: cleanedText }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setResult({ type: "error", message: data.error || 'Try saying: "Update Mouse to 20"' });
+        return;
+      }
+
+      const productName = data?.product ? String(data.product) : "";
+      const parsedQuantity = Number(data?.quantity);
+      if (productName && !Number.isNaN(parsedQuantity)) {
+        updateStock(productName, parsedQuantity);
+      }
+      await refreshProducts();
+      setResult({ type: "success", message: data.message || "Stock updated successfully" });
+    } catch {
+      setResult({ type: "error", message: "Could not reach backend voice service." });
     }
   };
 
@@ -25,9 +49,12 @@ export default function VoiceCommand() {
     if (isListening) {
       stopListening();
       setTimeout(() => {
-        if (transcript) {
-          processCommand(transcript);
+        const latestText = latestTranscriptRef.current.trim();
+        if (latestText) {
+          void processCommand(latestText);
           resetTranscript();
+        } else {
+          setResult({ type: "error", message: "No speech captured. Please try again." });
         }
       }, 400);
     } else {

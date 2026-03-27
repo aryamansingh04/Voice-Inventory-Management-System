@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, ReactNode, useEffect } from "react";
 import { Product, LOW_STOCK_THRESHOLD } from "@/types/inventory";
 
 const INITIAL_PRODUCTS: Product[] = [
@@ -25,6 +25,7 @@ interface InventoryContextType {
   updateStock: (nameOrId: string, newQuantity: number) => string;
   adjustStock: (nameOrId: string, delta: number) => string;
   deleteProduct: (id: string) => void;
+  refreshProducts: () => Promise<void>;
 }
 
 const InventoryContext = createContext<InventoryContextType | null>(null);
@@ -38,6 +39,35 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
   const addActivity = (message: string) => {
     setActivities((prev) => [{ id: crypto.randomUUID(), message, time: new Date() }, ...prev].slice(0, 20));
   };
+
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5000";
+
+  const mapApiProduct = (raw: any): Product => ({
+    id: String(raw.P_ID ?? raw.id ?? ""),
+    name: String(raw.P_Name ?? raw.name ?? ""),
+    category: String(raw.Cat_Name ?? raw.category ?? "Uncategorized"),
+    quantity: Number(raw.quantity ?? 0),
+    description: raw.P_Desc ?? raw.description ?? "",
+  });
+
+  const refreshProducts = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiBaseUrl}/products`);
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (!Array.isArray(data)) return;
+
+      const mapped = data.map(mapApiProduct).filter((p) => p.id && p.name);
+      if (mapped.length > 0) setProducts(mapped);
+    } catch {
+      // Keep local fallback products if backend is unavailable.
+    }
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    void refreshProducts();
+  }, [refreshProducts]);
 
   const addProduct = useCallback((product: Omit<Product, "id">) => {
     setProducts((prev) => [...prev, { ...product, id: crypto.randomUUID() }]);
@@ -95,7 +125,7 @@ export function InventoryProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <InventoryContext.Provider value={{ products, activities, addProduct, updateStock, adjustStock, deleteProduct }}>
+    <InventoryContext.Provider value={{ products, activities, addProduct, updateStock, adjustStock, deleteProduct, refreshProducts }}>
       {children}
     </InventoryContext.Provider>
   );

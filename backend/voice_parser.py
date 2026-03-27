@@ -1,19 +1,4 @@
-import speech_recognition as sr
-
-
-def get_voice_command():
-    recognizer = sr.Recognizer()
-
-    with sr.Microphone() as source:
-        print("🎤 Listening...")
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        audio = recognizer.listen(source)
-
-    try:
-        text = recognizer.recognize_google(audio)
-        return text.lower()
-    except:
-        return None
+import re
 
 
 def parse_command(text):
@@ -26,30 +11,20 @@ def parse_command(text):
     elif "low stock" in text:
         return "LOW_STOCK"
 
-    elif "update" in text or "change" in text:
+    elif "update" in text or "change" in text or "set" in text:
         return "UPDATE_STOCK"
 
     return "UNKNOWN"
 
 
 def extract_update_details(text):
-    words = text.split()
-
-    product = None
-    quantity = None
-
-    try:
-        for word in words:
-            if word.isdigit():
-                quantity = int(word)
-
-        if "update" in words:
-            product = words[words.index("update") + 1]
-
-        elif "change" in words:
-            product = words[words.index("change") + 1]
-
-    except:
+    if not text:
         return None, None
 
+    match = re.search(r"(?:update|change|set)\s+(.+?)\s+(?:stock\s+)?to\s+(\d+)", text, re.IGNORECASE)
+    if not match:
+        return None, None
+
+    product = match.group(1).strip()
+    quantity = int(match.group(2))
     return product, quantity
